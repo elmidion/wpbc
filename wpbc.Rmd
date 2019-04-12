@@ -1,0 +1,325 @@
+---
+title: "Wisconsin Prognostic Breast Cancer (WPBC)"
+author: "*Kiseong Park; Doctor, Data scientist*"
+date: "*Friday, April 11, 2019*"
+output: html_notebook
+---
+
+This is analytic report of Wisconsin Prognostic Breast Cancer data(https://goo.gl/mVFQUa). 
+
+```{r message=FALSE}
+library(dplyr)
+library(ggplot2)
+source("C:/Users/KS-Park/OneDrive/Documents/binomial_deviance.R")
+source("C:/Users/KS-Park/OneDrive/Documents/panel.cor.R")
+wpbc <- read.csv("E:/AI/projects/wpbc/wpbc.csv")
+library(ROCR)
+```
+
+The data has 198 observations and 35 variables.
+
+First column is `ID number` of observations. It has to be removed for analysis.
+
+```{r}
+wp <- wpbc[,-1]
+```
+
+`lymph node status` has 4 missing values.
+
+These observations also has to be removed.
+```{r include=FALSE}
+table(wp$lymph_node_status)
+wp <- wp %>% filter(wp$lymph_node_status != '?')
+```
+
+<br>
+
+## Exploratory data analysis ##
+
+`outcome` means recurred or not recurred. It is categorical variable. 'R' is recurred, 'N' is not recurred.
+
+`time` means recurrence time or disease-free time. When `outcome` is 'R', `time` is recurrence time. But when `outcome` is 'N', `time` is disease-free time.
+
+```{r}
+wp %>% ggplot(aes(outcome, time)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+```
+
+There are 10 variables as pathologic characteristics:
+`radius`, `texture`, `perimeter`, `area`, `smoothness`, `compactness`, `concavity`, `concavity points`, `symmetry`, `fractal dimension`.
+
+Each has `mean`, `se`, and `worst` of itself.
+`worst` is the mean of 3 highest values in its values.
+
+Let's see the correlations in these variables.
+
+Lower plots are the correlations of the outcome and means of variables.
+
+```{r}
+pairs(wp %>% select('outcome', starts_with('mean_')),
+      lower.panel=function(x,y){points(x,y); abline(0, 1,  col='red')},
+      upper.panel=panel.cor)
+```
+
+Lower plots are the correlations of the outcome and standard errors of variables.
+
+```{r}
+pairs(wp %>% select(outcome, starts_with('se_')),
+      lower.panel = function(x, y){points(x, y); abline(0, 1, col='red')},
+      upper.panel = panel.cor)
+```
+
+Lower plots are the corrleation of the outcome and worsts of variables.
+
+```{r}
+pairs(wp %>% select(outcome, starts_with('worst_')),
+      lower.panel = function(x, y){points(x, y); abline(0, 1, col='red')},
+      upper.panel = panel.cor)
+```
+`worst_radius`, `worst_perimeter` and `worst_area` show correlations with outcome.
+
+```{r message=FALSE}
+library(gridExtra)
+p1 <- wp %>% ggplot(aes(outcome, worst_radius)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+p2 <- wp %>% ggplot(aes(outcome, worst_perimeter)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+p3 <- wp %>% ggplot(aes(outcome, worst_area)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+grid.arrange(p1, p2, p3, ncol=3)
+
+```
+
+<br>
+
+`tumor size` is the diameter of excised tumor in centimeters.
+
+`lymph node status` is the number of positive axillary lymph nodes observed at time of surgery.
+
+```{r}
+wp$lymph_node_status <- as.integer(wp$lymph_node_status, ordered=T)
+p4 <- wp %>% ggplot(aes(outcome, tumor_size)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+p5 <- wp %>% ggplot(aes(outcome, lymph_node_status)) + geom_jitter(col='grey') + geom_boxplot(alpha=.5)
+grid.arrange(p4, p5, ncol=2)
+```
+
+<br>
+
+## Divide into 3 groups: training, validation, and test
+
+```{r}
+wp <- wp %>% mutate(outcome = ifelse(outcome == 'R', 1, 0))
+
+set.seed(0412)
+n <- nrow(wp)
+idx <- 1:n
+training_idx <- sample(idx, n*0.6)
+validation_idx <- setdiff(idx, training_idx)
+test_idx <- sample(validation_idx, n*0.2)
+validation_idx <- setdiff(validation_idx, test_idx)
+training <- wp[training_idx,]
+validation <- wp[validation_idx,]
+test <- wp[test_idx,]
+y_obs <- ifelse(validation$outcome == 1, 1, 0)
+```
+
+<br>
+
+## GLM analysis ##
+```{r message=FALSE, warning=FALSE}
+wp_glm <- glm(outcome ~ ., data = training, family='binomial')
+wp_glm %>% summary()
+
+yhat_glm <- predict(wp_glm, newdata = validation, type='response')
+bd_glm <- binomial_deviance(y_obs, yhat_glm)
+
+pred_glm <- prediction(yhat_glm, y_obs)
+perf_glm <- performance(pred_glm, measure = 'tpr', x.measure = 'fpr')
+AUC_glm <- performance(pred_glm, 'auc')@y.values[[1]]
+
+df.glm <- data.frame(Method = 'GLM', Binomial.deviance = bd_glm, AUC = AUC_glm)
+df.glm
+```
+
+<br>
+
+## Lasso Regression Analysis ##
+
+```{r message=FALSE}
+library(glmnet)
+training.x <- model.matrix(outcome ~ .-1, training)
+training.y <- ifelse(training$outcome == 1, 1, 0)
+wp_lasso <- cv.glmnet(training.x, training.y, family = 'binomial')
+wp_lasso %>% plot()
+coef(wp_lasso, s='lambda.min')
+
+validation.x <- model.matrix(outcome ~ .-1, validation)
+yhat_lasso <- predict(wp_lasso, s='lambda.min', newx = validation.x, type='response')
+bd_lasso <- binomial_deviance(y_obs, yhat_lasso)
+
+pred_lasso <- prediction(yhat_lasso, y_obs)
+perf_lasso <- performance(pred_lasso, measure = 'tpr', x.measure = 'fpr')
+AUC_lasso <- performance(pred_lasso, 'auc')@y.values[[1]]
+
+df.lasso <- data.frame(Method = 'Lasso', Binomial.deviance = bd_lasso, AUC = AUC_lasso)
+df.lasso
+```
+
+<br>
+
+## Ridge Regression Analysis ##
+
+```{r}
+wp_ridge <- cv.glmnet(training.x, training.y, alpha = 0, family = 'binomial')
+wp_ridge %>% plot()
+coef(wp_ridge, s='lambda.min')
+
+yhat_ridge <- predict(wp_ridge, s='lambda.min', newx = validation.x, type='response')
+bd_ridge <- binomial_deviance(y_obs, yhat_ridge)
+
+pred_ridge <- prediction(yhat_ridge, y_obs)
+perf_ridge <- performance(pred_ridge, measure = 'tpr', x.measure = 'fpr')
+AUC_ridge <- performance(pred_ridge, 'auc')@y.values[[1]]
+
+df.ridge <- data.frame(Method = 'Ridge', Binomial.deviance = bd_ridge, AUC = AUC_ridge)
+df.ridge
+
+```
+
+<br>
+
+## Elastric Regression Analysis ##
+
+```{r}
+wp_elastic <- cv.glmnet(training.x, training.y, alpha = 0.5, family='binomial')
+wp_elastic %>% plot()
+coef(wp_elastic, s='lambda.min')
+
+yhat_elastic <- predict(wp_elastic, s='lambda.min', newx = validation.x, type='response')
+bd_elastic <- binomial_deviance(y_obs, yhat_elastic)
+
+pred_elastic <- prediction(yhat_elastic, y_obs)
+perf_elastic <- performance(pred_elastic, measure = 'tpr', x.measure = 'fpr')
+AUC_elastic <- performance(pred_elastic, 'auc')@y.values[[1]]
+
+df.elastic <- data.frame(Method = 'Elastic', Binomial.deviance = bd_elastic, AUC = AUC_elastic)
+df.elastic
+
+```
+
+<br>
+
+## Classification tree ##
+
+```{r}
+library(rpart)
+training.tr <- training %>% mutate(outcome = as.factor(outcome))
+
+wp_tr <- rpart(outcome ~ ., training.tr)
+wp_tr
+wp_tr %>% plot()
+text(wp_tr, use.n = T)
+
+yhat_tr <- predict(wp_tr, newdata = validation, type='prob')
+yhat_tr <- c(yhat_tr[,2])
+bd_tr <- binomial_deviance(y_obs, yhat_tr)
+
+pred_tr <- prediction(yhat_tr, y_obs)
+perf_tr <- performance(pred_tr, measure = 'tpr', x.measure = 'fpr')
+AUC_tr <- performance(pred_tr, 'auc')@y.values[[1]]
+
+df.tr <- data.frame(Method = 'CTR', Binomial.deviance = bd_tr, AUC = AUC_tr)
+df.tr
+
+```
+
+<br>
+
+## RandomForest Analysis ##
+
+```{r message=FALSE}
+set.seed(0412)
+library(randomForest)
+wp_rf <- randomForest(outcome ~ ., training.tr)
+wp_rf %>% plot()
+wp_rf %>% varImpPlot()
+
+yhat_rf <- predict(wp_rf, newdata = validation, type='prob')
+yhat_rf <- c(yhat_rf[,2])
+bd_rf <- binomial_deviance(y_obs, yhat_rf)
+
+pred_rf <- prediction(yhat_rf, y_obs)
+perf_rf <- performance(pred_rf, measure = 'tpr', x.measure = 'fpr')
+AUC_rf <- performance(pred_rf, 'auc')@y.values[[1]]
+
+df.rf <- data.frame(Method = 'RF', Binomial.deviance = bd_rf, AUC = AUC_rf)
+df.rf
+
+```
+
+<br>
+
+## Gradient Boosting Machine Analysis ##
+
+```{r}
+set.seed(0412)
+library(gbm)
+
+wp_gbm <- gbm(outcome ~ ., training, distribution = 'bernoulli', n.trees = 1000, cv.folds = 5, verbose = F)
+best_iter <- gbm.perf(wp_gbm, method='cv')
+
+yhat_gbm <- predict(wp_gbm, n.trees = best_iter, newdata = validation, type='response')
+bd_gbm <- binomial_deviance(y_obs, yhat_gbm)
+
+pred_gbm <- prediction(yhat_gbm, y_obs)
+perf_gbm <- performance(pred_gbm, measure = 'tpr', x.measure = 'fpr')
+AUC_gbm <- performance(pred_gbm, 'auc')@y.values[[1]]
+
+df.gbm <- data.frame(Method = 'GBM', Binomial.deviance = bd_gbm, AUC = AUC_gbm)
+df.gbm
+
+```
+
+<br>
+
+## Model Selection ##
+
+```{r}
+result.df <- rbind(df.glm, df.lasso, df.ridge, df.elastic, df.tr, df.rf
+      , df.gbm)
+result.df
+
+plot(perf_glm, col='red', main = 'ROC curve')
+plot(perf_lasso, col='orange', add=T)
+plot(perf_ridge, col='yellow', add=T)
+plot(perf_elastic, col='green', add=T)
+plot(perf_tr, col='cyan', add=T)
+plot(perf_rf, col='blue', add=T)
+plot(perf_gbm, col='purple', add=T)
+abline(0, 1, col='black')
+legend('bottomright', inset=.1,
+       legend = c('GLM', 'Lasso', 'Ridge', 'Elastic', 'CTR', 'RF', 'GBM'),
+       col=c('red', 'orange', 'yellow', 'green', 'cyan', 'blue', 'purple'),
+       lty = 1, lwd = 2, cex=1.0)
+```
+
+Lasso regression model has the least binomial deviance and the biggest AUC.
+Therefore, I choice Lasso regression model to predict the outcome.
+
+<br>
+
+## Test for selected Model ##
+
+```{r}
+test.x <- model.matrix(outcome ~ .-1, test)
+yhat_test <- predict(wp_lasso, s='lambda.min', newx = test.x, type='response')
+y_test <- ifelse(test$outcome == 1, 1, 0)
+bd_test <- binomial_deviance(y_test, yhat_test)
+
+pred_test <- prediction(yhat_test, y_test)
+perf_test <- performance(pred_test, measure = 'tpr', x.measure = 'fpr')
+plot(perf_test, col='orange', main = 'ROC curve for test data')
+abline(0, 1, col='black')
+AUC_test <- performance(pred_test, 'auc')@y.values[[1]]
+
+test.df <- c(Method = 'Lasso', Binomial.deviance = bd_test, AUC = AUC_test)
+test.df
+```
+
+The selected Lasso regression model shows the binomial deviance of 31.8 and the AUC of 0.775 for the test data.
