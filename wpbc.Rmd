@@ -1,8 +1,10 @@
 ---
 title: "Wisconsin Prognostic Breast Cancer (WPBC)"
-author: "*Kiseong Park; Doctor, Data scientist*"
-date: "*Friday, April 11, 2019*"
-output: html_notebook
+author: '*Kiseong Park; Doctor, Data scientist*'
+date: '*Friday, April 11, 2019*'
+output:
+  html_document:
+    df_print: paged
 ---
 
 This is analytic report of Wisconsin Prognostic Breast Cancer data(https://goo.gl/mVFQUa). 
